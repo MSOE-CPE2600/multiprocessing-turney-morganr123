@@ -9,7 +9,15 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <sys/wait.h>
+#include <sys/types.h>
 #include "jpegrw.h"
+#include <time.h>
+#include <semaphore.h>
+#include <pthread.h>
+#include <fcntl.h>
+
+#define NUM_FRAMES 50
 
 // local routines
 static int iteration_to_color( int i, int max );
@@ -18,6 +26,29 @@ static void compute_image( imgRawImage *img, double xmin, double xmax,
 									double ymin, double ymax, int max );
 static void show_help();
 
+// Worker process to generate a portion of the image
+void child_process(int id, double x_center, double y_center, double zoom, int num_frames, int image_width, int image_height, int max) {
+    char filename[256];
+    sprintf(filename, "mandel%d.jpg", (id+1));  // Assuming JPEG output
+    printf("Child %d started processing\n", (id+1));
+
+    // Create a raw image of the appropriate size.
+    imgRawImage *img = initRawImage(image_width, image_height);
+
+    // Fill it with a black color (assuming black is the default)
+    setImageCOLOR(img, 0);
+
+    // Compute the Mandelbrot image
+    compute_image(img, x_center - zoom / 2, x_center + zoom / 2, y_center - zoom / 2, y_center + zoom / 2, max);
+
+    // Save the image in the stated file
+    storeJpegImageFile(img, filename);
+
+    // Free the allocated memory
+    freeRawImage(img);
+
+    printf("Child %d finished processing\n", (id+1));
+}
 
 int main( int argc, char *argv[] )
 {
@@ -33,11 +64,12 @@ int main( int argc, char *argv[] )
 	int    image_width = 1000;
 	int    image_height = 1000;
 	int    max = 1000;
+	int num_children = 1;
 
 	// For each command line argument given,
 	// override the appropriate configuration value.
 
-	while((c = getopt(argc,argv,"x:y:s:W:H:m:o:h"))!=-1) {
+	while((c = getopt(argc,argv,"x:y:s:W:H:m:o:n:h"))!=-1) {
 		switch(c) 
 		{
 			case 'x':
@@ -60,6 +92,9 @@ int main( int argc, char *argv[] )
 				break;
 			case 'o':
 				outfile = optarg;
+				break;
+			case 'n':
+				num_children = atoi(optarg);
 				break;
 			case 'h':
 				show_help();
@@ -89,7 +124,51 @@ int main( int argc, char *argv[] )
 	// free the mallocs
 	freeRawImage(img);
 
-	return 0;
+	clock_t start_time = clock(); // Start the timer
+
+    pid_t pid;
+
+	int count = 0;
+
+    // number of frames processed each round
+    for (int frame = 0; frame < (NUM_FRAMES/num_children); frame++) {
+        for (int i = 0; i < num_children; i++) {
+            pid = fork();  // Fork a child process for each frame
+
+            if (pid == 0) {
+                // Child process: generate the specific frame assigned to it
+                double frame_zoom = (1.0 + (count+i) * 0.025);  // Adjust the zoom per child
+                child_process(i+count, xcenter, ycenter, frame_zoom, NUM_FRAMES, image_width, image_height, max);
+                exit(0);  // Exit after completing the task for this frame
+            }
+        }
+		count += num_children;
+        // Wait for all child processes to finish before moving to the next frames
+        for (int i = 0; i < num_children; i++) {
+            wait(NULL);
+        }
+	}
+	if(NUM_FRAMES % num_children != 0) {
+		int extra = NUM_FRAMES % num_children;
+		for (int i = 0; i < extra; i++) {
+            pid = fork();  // Fork a child process for each frame
+
+            if (pid == 0) {
+                // Child process: generate the specific frame assigned to it
+                double frame_zoom = (1.0 + (count+i) * 0.025);  // Adjust the zoom per child
+                child_process(i+count, xcenter, ycenter, frame_zoom, NUM_FRAMES, image_width, image_height, max);
+                exit(0);  // Exit after completing the task for this frame
+            }
+        }
+        // Wait for all child processes to finish before moving to the next frames
+        for (int i = 0; i < num_children; i++) {
+            wait(NULL);
+        }
+    }
+
+    clock_t end_time = clock(); // End the timer
+    double runtime = (double)(end_time - start_time) / CLOCKS_PER_SEC;
+    printf("Total runtime with %d children and %d frames: %.2f seconds\n", num_children, NUM_FRAMES, runtime);
 }
 
 
