@@ -26,20 +26,33 @@ static void compute_image( imgRawImage *img, double xmin, double xmax,
 									double ymin, double ymax, int max );
 static void show_help();
 
+struct thread_args {
+    int id;
+    double xcenter;
+    double ycenter;
+    double zoom;
+    int num_frames;
+    int image_width;
+    int image_height;
+    int max;
+};
+
 // Worker process to generate a portion of the image
-void child_process(int id, double x_center, double y_center, double zoom, int num_frames, int image_width, int image_height, int max) {
+void* child_process(void* arg) {
+	struct thread_args* args = (struct thread_args*) arg;
     char filename[256];
-    sprintf(filename, "mandel%d.jpg", (id+1));  // Assuming JPEG output
-    printf("Child %d started processing\n", (id+1));
+    sprintf(filename, "mandel%d.jpg", (args->id + 1));  // Assuming JPEG output
+    printf("Process %d started processing\n", (args->id + 1));
 
     // Create a raw image of the appropriate size.
-    imgRawImage *img = initRawImage(image_width, image_height);
+    imgRawImage* img = initRawImage(args->image_width, args->image_height);
 
     // Fill it with a black color (assuming black is the default)
     setImageCOLOR(img, 0);
 
     // Compute the Mandelbrot image
-    compute_image(img, x_center - zoom / 2, x_center + zoom / 2, y_center - zoom / 2, y_center + zoom / 2, max);
+    compute_image(img, args->xcenter - args->zoom / 2, args->xcenter + args->zoom / 2, 
+                  args->ycenter - args->zoom / 2, args->ycenter + args->zoom / 2, args->max);
 
     // Save the image in the stated file
     storeJpegImageFile(img, filename);
@@ -47,7 +60,8 @@ void child_process(int id, double x_center, double y_center, double zoom, int nu
     // Free the allocated memory
     freeRawImage(img);
 
-    printf("Child %d finished processing\n", (id+1));
+    printf("Process %d finished processing\n", (args->id + 1));
+    return NULL;
 }
 
 int main( int argc, char *argv[] )
@@ -65,11 +79,12 @@ int main( int argc, char *argv[] )
 	int    image_height = 1000;
 	int    max = 1000;
 	int num_children = 1;
+	char choice;
 
 	// For each command line argument given,
 	// override the appropriate configuration value.
 
-	while((c = getopt(argc,argv,"x:y:s:W:H:m:o:n:h"))!=-1) {
+	while((c = getopt(argc,argv,"x:y:s:W:H:m:o:n:t:h"))!=-1) {
 		switch(c) 
 		{
 			case 'x':
@@ -95,6 +110,11 @@ int main( int argc, char *argv[] )
 				break;
 			case 'n':
 				num_children = atoi(optarg);
+				choice = 'n';
+				break;
+			case 't':
+				num_children = atoi(optarg);
+				choice = 't';
 				break;
 			case 'h':
 				show_help();
@@ -124,51 +144,114 @@ int main( int argc, char *argv[] )
 	// free the mallocs
 	freeRawImage(img);
 
-	clock_t start_time = clock(); // Start the timer
+	if(choice == 'n') {
+		pid_t pid;
 
-    pid_t pid;
+		int count = 0;
+		// number of frames processed each round
+		for (int frame = 0; frame < (NUM_FRAMES/num_children); frame++) {
+			for (int i = 0; i < num_children; i++) {
+				pid = fork();  // Fork a child process for each frame
 
-	int count = 0;
+				if (pid == 0) {
+					// Child process: generate the specific frame assigned to it
+					struct thread_args args;
+					double frame_zoom = (1.0 + (count + i) * 0.025);  // Adjust the zoom per child
+					int current = i + count;
+					args.id = current;
+					args.xcenter = xcenter;
+					args.ycenter = ycenter;
+					args.zoom = frame_zoom;
+					args.num_frames = NUM_FRAMES;
+					args.image_width = image_width;
+					args.image_height = image_height;
+					args.max = max;
+					child_process((void*) &args);
+					exit(0);  // Exit after completing the task for this frame
+				}
+			}
+			count += num_children;
+			// Wait for all child processes to finish before moving to the next frames
+			for (int i = 0; i < num_children; i++) {
+				wait(NULL);
+			}
+		}
+		if(NUM_FRAMES % num_children != 0) {
+			int extra = NUM_FRAMES % num_children;
+			for (int i = 0; i < extra; i++) {
+				pid = fork();  // Fork a child process for each frame
 
-    // number of frames processed each round
-    for (int frame = 0; frame < (NUM_FRAMES/num_children); frame++) {
-        for (int i = 0; i < num_children; i++) {
-            pid = fork();  // Fork a child process for each frame
+				if (pid == 0) {
+					// Child process: generate the specific frame assigned to it
+					struct thread_args args;
+					double frame_zoom = (1.0 + (count + i) * 0.025);  // Adjust the zoom per child
+					int current = i + count;
+					args.id = current;
+					args.xcenter = xcenter;
+					args.ycenter = ycenter;
+					args.zoom = frame_zoom;
+					args.num_frames = NUM_FRAMES;
+					args.image_width = image_width;
+					args.image_height = image_height;
+					args.max = max;
+					child_process((void*) &args);
+					exit(0);  // Exit after completing the task for this frame
+				}
+			}
+			// Wait for all child processes to finish before moving to the next frames
+			for (int i = 0; i < num_children; i++) {
+				wait(NULL);
+			}
+		}
+	} else if(choice == 't') {
+		int count = 0;
+		// number of frames processed each round
+		for (int frame = 0; frame < (NUM_FRAMES/num_children); frame++) {
+			pthread_t threads[num_children];
+			struct thread_args args[num_children];
+			for (int i = 0; i < num_children; i++) {
+            	double frame_zoom = (1.0 + (count + i) * 0.025);  // Adjust the zoom per child
+            	int current = i + count;
+            	args[i].id = current;
+            	args[i].xcenter = xcenter;
+            	args[i].ycenter = ycenter;
+            	args[i].zoom = frame_zoom;
+            	args[i].num_frames = NUM_FRAMES;
+            	args[i].image_width = image_width;
+            	args[i].image_height = image_height;
+            	args[i].max = max;
+				pthread_create(&threads[i], NULL, &child_process, (void*)&args[i]);
+			}
 
-            if (pid == 0) {
-                // Child process: generate the specific frame assigned to it
-                double frame_zoom = (1.0 + (count+i) * 0.025);  // Adjust the zoom per child
-                child_process(i+count, xcenter, ycenter, frame_zoom, NUM_FRAMES, image_width, image_height, max);
-                exit(0);  // Exit after completing the task for this frame
-            }
-        }
-		count += num_children;
-        // Wait for all child processes to finish before moving to the next frames
-        for (int i = 0; i < num_children; i++) {
-            wait(NULL);
-        }
+			// Wait for all child processes to finish before moving to the next frames
+			for (int i = 0; i < num_children; i++) {
+				pthread_join(threads[i], NULL);
+			}
+			count += num_children;
+		}
+		if(NUM_FRAMES % num_children != 0) {
+			int extra = NUM_FRAMES % num_children;
+			pthread_t threads[extra];
+			struct thread_args args[extra];
+			for (int i = 0; i < extra; i++) {
+            	double frame_zoom = (1.0 + (count + i) * 0.025);  // Adjust the zoom per child
+            	int current = i + count;
+            	args[i].id = current;
+            	args[i].xcenter = xcenter;
+            	args[i].ycenter = ycenter;
+            	args[i].zoom = frame_zoom;
+            	args[i].num_frames = NUM_FRAMES;
+            	args[i].image_width = image_width;
+            	args[i].image_height = image_height;
+            	args[i].max = max;
+				pthread_create(&threads[i], NULL, &child_process, (void*)&args[i]);
+			}
+			// Wait for all child processes to finish before moving to the next frames
+			for (int i = 0; i < extra; i++) {
+				pthread_join(threads[i], NULL);
+			}
+		}
 	}
-	if(NUM_FRAMES % num_children != 0) {
-		int extra = NUM_FRAMES % num_children;
-		for (int i = 0; i < extra; i++) {
-            pid = fork();  // Fork a child process for each frame
-
-            if (pid == 0) {
-                // Child process: generate the specific frame assigned to it
-                double frame_zoom = (1.0 + (count+i) * 0.025);  // Adjust the zoom per child
-                child_process(i+count, xcenter, ycenter, frame_zoom, NUM_FRAMES, image_width, image_height, max);
-                exit(0);  // Exit after completing the task for this frame
-            }
-        }
-        // Wait for all child processes to finish before moving to the next frames
-        for (int i = 0; i < num_children; i++) {
-            wait(NULL);
-        }
-    }
-
-    clock_t end_time = clock(); // End the timer
-    double runtime = (double)(end_time - start_time) / CLOCKS_PER_SEC;
-    printf("Total runtime with %d children and %d frames: %.2f seconds\n", num_children, NUM_FRAMES, runtime);
 }
 
 
